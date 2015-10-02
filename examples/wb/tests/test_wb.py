@@ -41,26 +41,11 @@ from cocotb.decorators import coroutine
 from cocotb.clock import Clock
 from cocotb.triggers import Timer, RisingEdge
 from cocotb.drivers.wishbone import WishboneOp as WBO
+from cocotb.drivers.wishbone import WishboneRes as WBR
 from cocotb.drivers.wishbone import WishboneMaster
+import cocotb.generators.word as genw
 
 
-@cocotb.coroutine
-def lifesign(dut, wait):
-    yield RisingEdge(dut.clk2)
-    count = 0;
-    while True:
-       yield Timer(wait)
-       count += 1
-       myStr = "Running - %u us" % (wait*count/1000)
-       dut.log.info(myStr)
-
-@cocotb.coroutine
-def uart_printer(dut):
-    yield RisingEdge(dut.reset_n2)
-    while True:
-        yield RisingEdge(dut.clk2)
-        if int(dut.uart_out_valid) == 1:
-           sys.stderr.write(str(unichr(dut.uart_out)))
            
         
 def input_thread(L):
@@ -68,22 +53,14 @@ def input_thread(L):
     L.append(None)
     
   
-def def_clks():
-    global clkref_period
-    global clksys_period
-    clkref_period = 80
-    clksys_period = 160
 
 
-@cocotb.coroutine
-def writelist(avm, ops):
-    for n in ops:
-        yield avm.write(ops(0), ops(1))
-
+    
 
 @cocotb.test()
 def test_wb(dut):
-    def_clks()
+    clkref_period = 80
+    clksys_period = 160
     
 #    """Example of a test using TUN/TAP over WB."""
     cocotb.fork(Clock(dut.clk, clkref_period).start())
@@ -105,27 +82,60 @@ def test_wb(dut):
     dut.reset_n2 <= 1
     dut.log.debug("Out of reset")
     
-    wbm  = WishboneMaster(dut, "wbm", dut.clk, 10, 5)
-    wbm.log.setLevel(logging.DEBUG) 
+    wbm  = WishboneMaster(dut, "wbm", dut.clk)
+    wbm.log.setLevel(logging.DEBUG)
+    
+
+    tsGen           = genw.random_data(0, 1000, 64)
+    idleGenWord     = genw.random_data(0, 5)
+    idleGenBlock    = genw.random_data(5, 50)
+    cntGenX1000     = genw.incrementing_data(0x1000)
+    cntGen          = genw.incrementing_data(1)
+    stdExp          = WBR(True, None, 6, 5, 5)    
+    
     oplist = []
-    oplist.append(WBO(0x0))
-    oplist.append(WBO(0x0, True, 123))
-    oplist.append(WBO(0x0))
-    oplist.append(WBO(0x0))
-    oplist.append(WBO(0x0, True, 456))
-    oplist.append(WBO(0x0))
-    oplist.append(WBO(0x0, True, 789))
-    oplist.append(WBO(0x0))
+    explist = []
+    reslist = []  
     
+    #oplist.append([WBO(0x0, True, 123, 0)])    
     
+    for i in range(1, 10):
+        tmpOplist = []
+        tmpExplist = []
+        ts = tsGen.next()
+
+        tmpOplist.append(WBO(0x0, True, ts >> 32,   idleGenWord.next()))
+        tmpExplist.append(stdExp)
+        tmpOplist.append(WBO(0x0, True, ts & 0xffffffff,          idleGenWord.next()))
+        tmpExplist.append(stdExp)
+        n = cntGenX1000.next()
+        tmpOplist.append(WBO(0x0, True, n + cntGen.next(), idleGenWord.next()))
+        tmpExplist.append(stdExp)
+        tmpOplist.append(WBO(0x0, True, n + cntGen.next(), idleGenWord.next()))
+        tmpExplist.append(stdExp)
+        tmpOplist.append(WBO(0x0, True, n + cntGen.next(), idleGenWord.next()))
+        tmpExplist.append(stdExp)
+        tmpOplist.append(WBO(0x0, True, n + cntGen.next(), idleGenWord.next()))
+        tmpExplist.append(stdExp)
+        tmpOplist.append(WBO(0x0, True, n + cntGen.next(), idleGenWord.next()))
+        tmpExplist.append(stdExp)
+        tmpOplist.append(WBO(0x0, True, n + cntGen.next(), idleGenBlock.next()))
+        tmpExplist.append(stdExp)
+        oplist += [tmpOplist]
+        explist.append(tmpExplist)
+        
+
+    
+    for cycle in oplist:
+        tmp = yield wbm.send_cycle(cycle)
+        reslist.append(tmp)    
     
     yield RisingEdge(dut.clk)
-    test = []
-    test0 = yield wbm.send_cycle(oplist)
-    test1 = yield wbm.send_cycle(oplist, False)
-    test2 = yield wbm.send_cycle(oplist)
-    test = test0 + test1 + test2    
-    print test
+    cnt = 0
+    for cycle in reslist:
+        for res in cycle:
+            print ("#%03u ACK: %s RD: %s IDLW: %u STLW: %u ACKW: %u" % (cnt, res.ack, res.dat, res.waitidle, res.waitstall, res.waitack))
+            cnt += 1
     yield RisingEdge(dut.clk)
   
     #cocotb.fork(lifesign(dut, 5000000))    

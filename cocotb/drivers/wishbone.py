@@ -35,21 +35,40 @@ import random
 
 import cocotb
 from cocotb.decorators import coroutine
-from cocotb.triggers import RisingEdge, ReadOnly, Event
+from cocotb.triggers import RisingEdge, Event
 from cocotb.drivers import BusDriver
 from cocotb.utils import hexdump
 from cocotb.binary import BinaryValue
 from cocotb.result import ReturnValue, TestError
-from cocotb.decorators import public
-from cocotb.generators.bit import bit_toggler
 
+def is_sequence(arg):
+        return (not hasattr(arg, "strip") and
+        hasattr(arg, "__getitem__") or
+        hasattr(arg, "__iter__"))
+
+
+class WishboneRes():
+    dat = None
+    ack = False
+    waitstall = 0
+    waitack = 0
+    waitidle = 0
+    
+    def __init__(self, ack, dat, idles, stalled, waitack):
+        self.ack        = ack        
+        self.dat        = dat
+        self.waitstall  = stalled
+        self.waitack    = waitack
+        self.waitidle   = idles
+        
 class WishboneOp():
     adr     = 0
     sel     = 0xf     
     we      = False
-    dat     = 0 
+    dat     = 0
+    idle    = 0
     
-    def __init__(self, adr, we=False, dat=0, sel=0xf):
+    def __init__(self, adr, we=False, dat=0, idle=0, sel=0xf):
         self.adr    = adr        
         if(we):        
             self.we = 1
@@ -57,6 +76,9 @@ class WishboneOp():
             self.we = 0
         self.dat    = dat
         self.sel    = sel
+        self.idle   = idle
+        
+  
 
 class Wishbone(BusDriver):
     """Wishbone
@@ -90,46 +112,26 @@ class WishboneMaster(Wishbone):
     _res_buf        = [] # save readdata/ack/err
     _op_buf         = [] # save read/write order
     _op_cnt         = 0 # number of ops we've been issued
-    _idle           = True
+    _clk_cycle_count = 0
     
-    def idler(self, maximum=10, sigma=None):
-        """Generator to intermittently insert a single cycle pulse
+
     
-        Kwargs:
-            max (int):     Max number of cycles in between single cycle gaps
-    
-            sigma (int):    Standard deviation of gaps.  mean/4 if sigma is None
-        """
-        while True:        
-            mean = maximum/2
-            if sigma is None:
-                sigma = mean / 4.0
-            val = random.gauss(mean, sigma)    
-            if val > maximum:
-                val = maximum
-            yield(int(abs(val)))
-    
-    def __init__(self, entity, name, clock, maxidle=0, stddev=0):
+    def __init__(self, entity, name, clock):
         Wishbone.__init__(self, entity, name, clock)
         self.log.info("Wishbone Master created")
         self.busy_event = Event("%s_busy" % name)
         self.busy = False
-        self.idle = self.idler(maxidle, stddev)
-
-    def __len__(self):
-        return 2**len(self.bus.adr)
-
-    
-        
-
+  
+  
     @coroutine
     def _open_cycle(self):
-        print "Opening"
         if self.busy:
+            self.log.debug("This should not be busy !!!")
             yield self.busy_event.wait()
         self.busy_event.clear()
         self.busy       = True
-        cocotb.fork(self._read()) 
+        cocotb.fork(self._read())
+        cocotb.fork(self._clk_cycle_counter()) 
         self.bus.cyc    <= 1
         self._acked_ops = 0  
         self._rd_buf    = [] 
@@ -138,9 +140,8 @@ class WishboneMaster(Wishbone):
         
     @coroutine    
     def _close_cycle(self):
-        #print "Closing Ops: %u Ackops: %u" % (self._op_cnt, self._acked_ops)
         while self._acked_ops < self._op_cnt:
-            #print "Waiting: Ops: %u Ackops: %u" % (len(self._op_buf), self._acked_ops)
+            self.log.debug("Waiting for missing acks: %u/%u" % (self._acked_ops, self._op_cnt) )
             yield RisingEdge(self.clock)
         self.busy = False
         self.busy_event.set()
@@ -152,18 +153,21 @@ class WishboneMaster(Wishbone):
     def _wait_stall(self):
         """Wait for stall to be low before continuing
         """
-        count = 0
+        count = None
         if hasattr(self.bus, "stall"):
+            count = 0            
             while self.bus.stall.getvalue():
                 yield RisingEdge(self.clock)
                 count += 1
             if count:
-                self.log.debug("Stalled for %u cycles" % count) 
+                self.log.debug("Stalled for %u cycles" % count)
+        raise ReturnValue(count)
     
     @coroutine
     def _wait_ack(self):
         """Wait for ACK on the bus before continuing
         """
+        count = None
         count = 0
         if not hasattr(self.bus, "stall"):
             while not self.bus.ack.getvalue():
@@ -178,23 +182,29 @@ class WishboneMaster(Wishbone):
         count = 0
         clkedge = RisingEdge(self.clock)
         while self.busy:
-            #print "Reader"
-           # print "ack: %u err: %u stb: %u cnt: %u" % (self.bus.ack.getvalue(), self.bus.err.getvalue(), self.bus.stb.getvalue(), count)
             if(self.bus.ack.getvalue() or self.bus.err.getvalue()):
                 self._acked_ops += 1
-                #print self._op_buf                
-                #print "Ops: %u Ackops: %u" % (len(self._op_buf), self._acked_ops)                
-                if(not self._op_buf[self._acked_ops-1]):
+                [we, idle, stalled, ts] = self._op_buf[self._acked_ops-1]
+                if(not we):
                     val = int(self.bus.datrd.getvalue())
                 else:
                     val = None
-                    #print "Saving. Ops: %u Ackops: %u We %u Val %x" % (len(self._op_buf), self._acked_ops,  self._op_buf[self._acked_ops-1], self.bus.datrd.getvalue())
-                self._res_buf.append([val , int(self.bus.ack.getvalue())] )
+                self._res_buf.append(WishboneRes(bool(self.bus.ack.getvalue()), val, idle, stalled, self._clk_cycle_count-ts))
             yield clkedge
-            count += 1
+            count += 1    
+
+    @coroutine 
+    def _clk_cycle_counter(self):
+        """
+        """
+        clkedge = RisingEdge(self.clock)
+        self._clk_cycle_count = 0
+        while self.busy:
+            yield clkedge
+            self._clk_cycle_count += 1
 
     @coroutine
-    def _drive(self, op):
+    def _drive(self, we, adr, dat, sel, idle):
         """
         Args:
             string (str): A string of bytes to send over the bus
@@ -203,21 +213,20 @@ class WishboneMaster(Wishbone):
         #print "Driver"
         clkedge = RisingEdge(self.clock)
         if self.busy:
-            idle = self.idle.next()
-            if idle > 0 and self._idle:
-                self.log.debug("Idling for %u cycles" % idle) 
-                while idle > 0:
-                    idle -= 1
+            if idle != None:
+                idlecnt = idle
+                while idlecnt > 0:
+                    idlecnt -= 1
                     yield clkedge
                 
             self.bus.stb    <= 1
-            self.bus.adr    <= op.adr            
-            self.bus.sel    <= op.sel
-            self.bus.datwr  <= op.dat
-            self.bus.we     <= op.we
+            self.bus.adr    <= adr
+            self.bus.sel    <= sel
+            self.bus.datwr  <= dat
+            self.bus.we     <= we
             #deal with a current read (pipelined only)
-            yield self._wait_stall()
-            self._op_buf.append(op.we)
+            stalled = yield self._wait_stall()
+            self._op_buf.append([we, idle, stalled, self._clk_cycle_count])
             yield clkedge
             
             #print self._op_buf
@@ -229,30 +238,35 @@ class WishboneMaster(Wishbone):
         else:
            self.log.error("Cannot drive bus outside cycle")
 
-    
+
+  
     @coroutine
-    def send_cycle(self, ops, idle=True):
+    def send_cycle(self, arg):
         """
         Args:
-            string (str): A string of bytes to send over the bus
+            list(WishboneOp)
         """
-        # Avoid spurious object creation by recycling
-        if len(ops) < 1:
-            self.log.error("You gave me no operations to carry out")
-        else:        
-            self._op_cnt = len(ops)
-            self._idle = idle
-            firstword = True
-            
-            for op in ops:
-                if firstword:
-                    yield self._open_cycle()
-                    firstword = False
-                yield self._drive(op)
-            yield self._close_cycle()
-            #print self._rd_buf
-        raise ReturnValue(self._res_buf)
-        
+        cnt = 0
+        clkedge = RisingEdge(self.clock)
+        yield clkedge
+        if is_sequence(arg):
+            if len(arg) < 1:
+                self.log.error("List contains no operations to carry out")
+            else:
+         
+                self._op_cnt = len(arg)
+                firstword = True
+                for op in arg:
+                    if firstword:
+                        firstword = False
+                        yield self._open_cycle()
+                    yield self._drive(op.we, op.adr, op.dat, op.sel, op.idle)
+                    self.log.debug("#%3u WE: %s ADR: 0x%08x DAT: 0x%08x SEL: 0x%1x IDLE: %3u" % (cnt, op.we, op.adr, op.dat, op.sel, op.idle))
+                    cnt += 1
+                yield self._close_cycle()
+            raise ReturnValue(self._res_buf)
+        else:
+            self.log.error("Expecting a list")
 
     
       
