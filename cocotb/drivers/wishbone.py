@@ -64,16 +64,11 @@ class WishboneRes():
 class WishboneOp():
     adr     = 0
     sel     = 0xf     
-    we      = False
     dat     = 0
     idle    = 0
     
-    def __init__(self, adr, we=False, dat=0, idle=0, sel=0xf):
+    def __init__(self, adr, dat=None, idle=0, sel=0xf):
         self.adr    = adr        
-        if(we):        
-            self.we = 1
-        else:
-            self.we = 0
         self.dat    = dat
         self.sel    = sel
         self.idle   = idle
@@ -182,7 +177,10 @@ class WishboneMaster(Wishbone):
         count = 0
         clkedge = RisingEdge(self.clock)
         while self.busy:
-            if(self.bus.ack.getvalue() or self.bus.err.getvalue()):
+            valid = self.bus.ack.getvalue()
+            if hasattr(self.bus, "err"):
+                valid = valid or self.bus.err.getvalue()     
+            if(valid):
                 self._acked_ops += 1
                 [we, idle, stalled, ts] = self._op_buf[self._acked_ops-1]
                 if(not we):
@@ -260,8 +258,12 @@ class WishboneMaster(Wishbone):
                     if firstword:
                         firstword = False
                         yield self._open_cycle()
-                    yield self._drive(op.we, op.adr, op.dat, op.sel, op.idle)
-                    self.log.debug("#%3u WE: %s ADR: 0x%08x DAT: 0x%08x SEL: 0x%1x IDLE: %3u" % (cnt, op.we, op.adr, op.dat, op.sel, op.idle))
+                    if op.dat != None:
+                        we = 1
+                    else:
+                        we = 0
+                    yield self._drive(we, op.adr, op.dat, op.sel, op.idle)
+                    self.log.debug("#%3u WE: %s ADR: 0x%08x DAT: 0x%08x SEL: 0x%1x IDLE: %3u" % (cnt, we, op.adr, op.dat, op.sel, op.idle))
                     cnt += 1
                 yield self._close_cycle()
             raise ReturnValue(self._res_buf)
