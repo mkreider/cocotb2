@@ -47,6 +47,20 @@ def is_sequence(arg):
         hasattr(arg, "__iter__"))
 
 
+class WishboneAux():
+    we          = False
+    sel         = 0xf
+    waitstall   = 0
+    waitidle    = 0
+    ts          = 0
+    
+    def __init__(self, we, sel, waitStall, waitIdle, tsStb):
+        self.we         = we        
+        self.sel        = sel
+        self.waitstall  = waitStall
+        self.ts       = tsStb
+        self.waitidle   = waitIdle
+
 class WishboneRes():
     dat = None
     ack = False
@@ -105,7 +119,7 @@ class WishboneMaster(Wishbone):
     """
     _acked_ops      = 0  # ack cntr. comp with opbuf len. wait for equality before releasing lock
     _res_buf        = [] # save readdata/ack/err
-    _op_buf         = [] # save read/write order
+    _aux_buf         = [] # save read/write order
     _op_cnt         = 0 # number of ops we've been issued
     _clk_cycle_count = 0
     
@@ -129,8 +143,8 @@ class WishboneMaster(Wishbone):
         cocotb.fork(self._clk_cycle_counter()) 
         self.bus.cyc    <= 1
         self._acked_ops = 0  
-        self._rd_buf    = [] 
-        self._op_buf    = []
+        self._res_buf   = [] 
+        self._aux_buf   = []
         self.log.debug("Opening cycle, %u Ops" % self._op_cnt)
         
     @coroutine    
@@ -154,8 +168,7 @@ class WishboneMaster(Wishbone):
             while self.bus.stall.getvalue():
                 yield RisingEdge(self.clock)
                 count += 1
-            if count:
-                self.log.debug("Stalled for %u cycles" % count)
+            self.log.debug("Stalled for %u cycles" % count)
         raise ReturnValue(count)
     
     @coroutine
@@ -177,17 +190,13 @@ class WishboneMaster(Wishbone):
         count = 0
         clkedge = RisingEdge(self.clock)
         while self.busy:
-            valid = self.bus.ack.getvalue()
+            valid = bool(self.bus.ack.getvalue())
             if hasattr(self.bus, "err"):
-                valid = valid or self.bus.err.getvalue()     
+                valid = valid or bool(self.bus.err.getvalue())
             if(valid):
+                val = int(self.bus.datrd.getvalue())
+                self._res_buf.append(WishboneRes(bool(self.bus.ack.getvalue()), val, None, None, self._clk_cycle_count))
                 self._acked_ops += 1
-                [we, idle, stalled, ts] = self._op_buf[self._acked_ops-1]
-                if(not we):
-                    val = int(self.bus.datrd.getvalue())
-                else:
-                    val = None
-                self._res_buf.append(WishboneRes(bool(self.bus.ack.getvalue()), val, idle, stalled, self._clk_cycle_count-ts))
             yield clkedge
             count += 1    
 
@@ -222,13 +231,15 @@ class WishboneMaster(Wishbone):
             self.bus.sel    <= sel
             self.bus.datwr  <= dat
             self.bus.we     <= we
+            yield clkedge
             #deal with a current read (pipelined only)
             stalled = yield self._wait_stall()
-            self._op_buf.append([we, idle, stalled, self._clk_cycle_count])
-            yield clkedge
+            self._aux_buf.append(WishboneAux(we, sel, stalled, idle, self._clk_cycle_count))
             
-            #print self._op_buf
+            
+            #print self._aux_buf
             self.bus.stb    <= 0
+            self.bus.we     <= 0
             # non pipelined
             yield self._wait_ack()
            
@@ -257,16 +268,27 @@ class WishboneMaster(Wishbone):
                 for op in arg:
                     if firstword:
                         firstword = False
+                        result = []
                         yield self._open_cycle()
+                        
                     if op.dat != None:
                         we = 1
+                        dat = op.dat
                     else:
                         we = 0
-                    yield self._drive(we, op.adr, op.dat, op.sel, op.idle)
-                    self.log.debug("#%3u WE: %s ADR: 0x%08x DAT: 0x%08x SEL: 0x%1x IDLE: %3u" % (cnt, we, op.adr, op.dat, op.sel, op.idle))
+                        dat = 0
+                    yield self._drive(we, op.adr, dat, op.sel, op.idle)
+                    self.log.debug("#%3u WE: %s ADR: 0x%08x DAT: 0x%08x SEL: 0x%1x IDLE: %3u" % (cnt, we, op.adr, dat, op.sel, op.idle))
                     cnt += 1
                 yield self._close_cycle()
-            raise ReturnValue(self._res_buf)
+                
+                for res, op in zip(self._res_buf, self._aux_buf):
+                    val = res.dat
+                    if op.we:
+                        val = None
+                    result.append(WishboneRes(res.ack, val, op.waitidle, op.waitstall, res.waitack-op.ts))
+                
+            raise ReturnValue(result)
         else:
             self.log.error("Expecting a list")
 

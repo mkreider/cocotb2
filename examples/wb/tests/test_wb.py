@@ -43,7 +43,9 @@ from cocotb.triggers import Timer, RisingEdge
 from cocotb.drivers.wishbone import WishboneOp as WBO
 from cocotb.drivers.wishbone import WishboneRes as WBR
 from cocotb.drivers.wishbone import WishboneMaster
+from cocotb.monitors.wishbone import WishboneSlave
 import cocotb.generators.word as genw
+import cocotb.generators.bit as genb
 
 
            
@@ -52,10 +54,41 @@ def input_thread(L):
     raw_input()
     L.append(None)
     
-  
 
+class rec():
+    cntcyc = 0
+    def __init__(self):
+        self.cntcyc = 0
+        
+    def receive(self, result):
+        print "Cycle #%3u" % (self.cntcyc)
+        self.cntcyc += 1
+        cnt = 0
+        for op in result:
+            print ("#%3u ADR: %s DAT: %s IDLW: %u SEL: 0x%x" % (cnt, op.adr, op.dat, op.idle, op.sel))
+            cnt += 1
 
+def bit_flip(gen_on, gen_off):
+    """Combines two generators to provide cycles_on, cycles_off tuples
+
+    Args:
+        gen_on (generator): generator that yields number of cycles on
+
+        gen_off (generator): generator that yields number of cycles off
+    """
     
+    while True:
+        
+        bits=[]
+        highCnt = int(abs(next(gen_on)))
+        for i in range(0, highCnt):
+           bits.append(1)
+        lowCnt = int(abs(next(gen_off)))           
+        for i in range(0, lowCnt):
+           bits.append(0)
+        for bit in bits:
+            yield bit
+        
 
 @cocotb.test()
 def test_wb(dut):
@@ -82,24 +115,34 @@ def test_wb(dut):
     dut.reset_n2 <= 1
     dut.log.debug("Out of reset")
     
-    wbm  = WishboneMaster(dut, "wbm", dut.clk)
-    wbm.log.setLevel(logging.DEBUG)
     
+    print "Seed: %s" % os.getenv('RANDOM_SEED')
 
     tsGen           = genw.random_data(0, 1000, 64)
     idleGenWord     = genw.random_data(0, 5)
+    replyWaitGen     = genw.random_data(0, 5)
     idleGenBlock    = genw.random_data(5, 50)
+    stallGen        = bit_flip(genw.random_data(2, 5), genw.random_data(5, 10))
     cntGenX1000     = genw.incrementing_data(0x1000)
     cntGen          = genw.incrementing_data(1)
     stdExp          = WBR(True, None, 6, 5, 5)    
+    datGen          = genw.incrementing_data(1)
+    
+    output = rec()
+    
+    wbm  = WishboneMaster(dut, "wbm", dut.clk)
+    wbm.log.setLevel(logging.DEBUG)
+    
+    wbs  = WishboneSlave(entity=dut, name="wbmo", clock=dut.clk, callback=output.receive, datgen=datGen, stallwaitgen=stallGen, replywaitgen=replyWaitGen)
+    wbs.log.setLevel(logging.INFO)    
     
     oplist = []
     explist = []
     reslist = []  
     
-    #oplist.append([WBO(0x0, True, 123, 0)])    
+    #oplist.append([WBO(0x0, 0xDEADBEEF, 123)])    
     
-    for i in range(1, 10):
+    for i in range(1, 3):
         tmpOplist = []
         tmpExplist = []
         ts = tsGen.next()
@@ -107,6 +150,7 @@ def test_wb(dut):
         tmpOplist.append(WBO(0x0, ts >> 32,          idleGenWord.next()))
         tmpExplist.append(stdExp)
         tmpOplist.append(WBO(0x0, ts & 0xffffffff,   idleGenWord.next()))
+        tmpOplist.append(WBO(0x0, None,   idleGenWord.next()))
         tmpExplist.append(stdExp)
         n = cntGenX1000.next()
         tmpOplist.append(WBO(0x0, n + cntGen.next(), idleGenWord.next()))
@@ -119,7 +163,8 @@ def test_wb(dut):
         tmpExplist.append(stdExp)
         tmpOplist.append(WBO(0x0, n + cntGen.next(), idleGenWord.next()))
         tmpExplist.append(stdExp)
-        tmpOplist.append(WBO(0x0, n + cntGen.next(), idleGenBlock.next()))
+        tmpOplist.append(WBO(0x0, None, idleGenBlock.next()))
+        
         tmpExplist.append(stdExp)
         oplist += [tmpOplist]
         explist.append(tmpExplist)
@@ -131,12 +176,18 @@ def test_wb(dut):
         reslist.append(tmp)    
     
     yield RisingEdge(dut.clk)
-    cnt = 0
+   
+    print "Reply:"   
+    cyccnt = 0    
+    
     for cycle in reslist:
+        print "Cycle #%3u" % (cyccnt)
+        cyccnt += 1
+        cnt = 0
         for res in cycle:
-            print ("#%03u ACK: %s RD: %s IDLW: %u STLW: %u ACKW: %u" % (cnt, res.ack, res.dat, res.waitidle, res.waitstall, res.waitack))
+            print ("#%3u ACK: %s RD: %s IDLW: %u STLW: %u ACKW: %u" % (cnt, res.ack, res.dat, res.waitidle, res.waitstall, res.waitack))
             cnt += 1
-    yield RisingEdge(dut.clk)
+#    yield RisingEdge(dut.clk)
   
     #cocotb.fork(lifesign(dut, 5000000))    
 

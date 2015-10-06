@@ -2,7 +2,7 @@
 
 # Modelsim is 32-bit only
 VPI_LIB := vpi
-#ARCH:=i686
+RND_SEED = 42
 ROOTPATH = $(PATH)
 SIM_ROOT = $(PWD)/../../..
 LIB_DIR = $(SIM_ROOT)/build/libs/x86_64:/opt/pym32/lib
@@ -52,6 +52,6 @@ clean::
 	rm results.xml   
 
 results.xml: runsim.do
-	sudo NEWPATH=$(ROOTPATH) -- bash -c 'export LM_LICENSE_FILE=$(LM_LICENSE_FILE); export PATH=$(PATH):$(NEWPATH); export LD_LIBRARY_PATH=$(LIB_DIR):$(LD_LIBRARY_PATH); SIM_ROOT=$(SIM_ROOT) MODULE=$(MODULE) TESTCASE=$(TESTCASE) TOPLEVEL=$(TOPLEVEL) PYTHONPATH=$(LIB_DIR):$(SIM_ROOT):$(PWD):$(PYTHONPATH) $(SIM_CMD) -do runsim.do 2>&1 | tee sim.log'
+	sudo NEWPATH=$(ROOTPATH) -- bash -c 'export RANDOM_SEED=$(RND_SEED);export LM_LICENSE_FILE=$(LM_LICENSE_FILE); export PATH=$(PATH):$(NEWPATH); export LD_LIBRARY_PATH=$(LIB_DIR):$(LD_LIBRARY_PATH); SIM_ROOT=$(SIM_ROOT) MODULE=$(MODULE) TESTCASE=$(TESTCASE) TOPLEVEL=$(TOPLEVEL) PYTHONPATH=$(LIB_DIR):$(SIM_ROOT):$(PWD):$(PYTHONPATH) $(SIM_CMD) -do runsim.do 2>&1 | tee sim.log'
 
 

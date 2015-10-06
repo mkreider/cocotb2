@@ -69,8 +69,6 @@ class WishboneOp():
         self.dat    = dat
         self.sel    = sel
         self.idle   = idle
-        
-  
 
 class Wishbone(BusMonitor):
     """Wishbone
@@ -81,8 +79,8 @@ class Wishbone(BusMonitor):
     _optional_signals = ["err", "stall"]
 
 
-    def __init__(self, entity, name, clock):
-        BusMonitor.__init__(self, entity, name, clock)
+    def __init__(self, *args, **kwargs):
+        BusMonitor.__init__(self, *args, **kwargs)
         # Drive some sensible defaults (setimmediatevalue to avoid x asserts)
         self.bus.ack.setimmediatevalue(0)
         self.bus.datrd.setimmediatevalue(0)
@@ -103,56 +101,45 @@ class Wishbone(BusMonitor):
 class WishboneSlave(Wishbone):
     """Wishbone slave
     """
+    def defaultGen():
+        while True:        
+            yield int(0)    
+    
     _acked_ops      = 0  # ack cntr. comp with opbuf len. wait for equality before releasing lock
+    _op_buf        = [] # save datwr, sel, idle
     _res_buf        = [] # save readdata/ack/err
     _clk_cycle_count = 0
-    _datGen         = None
-    _errGen         = None
-    _stallWaitGen   = None
-    _replyWaitGen   = None
-    _last_time      = 0
+    _cycle = False
+    _datGen         = defaultGen()
+    _errGen         = defaultGen()
+    _stallWaitGen   = defaultGen()
+    _replyWaitGen   = defaultGen()
+    _lastTime      = 0
 
-    def defaultGen(self):
-        while True:        
-            yield 0
+    
 
-    def __init__(self, entity, name, clock, datGen=None, errGen=None, replyWaitGen=None, stallWaitGen=None):
-        Wishbone.__init__(self, entity, name, clock)
+    def __init__(self, *args, **kwargs):
+        datGen = kwargs.pop('datgen', None)
+        errGen = kwargs.pop('errgen', None)
+        replyWaitGen = kwargs.pop('replywaitgen', None)
+        stallWaitGen = kwargs.pop('stallwaitgen', None)
+        print datGen
+        Wishbone.__init__(self, *args, **kwargs)
+        cocotb.fork(self._stall())
+        cocotb.fork(self._clk_cycle_counter())
+        cocotb.fork(self._ack())
         self.log.info("Wishbone Slave created")
-        self._replyWaitGen  = self.defaultGen 
-        self._stallWaitGen  = self.defaultGen 
-        self._datGen        = self.defaultGen 
-        self._errGen        = self.defaultGen 
+        
         if replyWaitGen != None:
             self._replyWaitGen  = replyWaitGen 
         if stallWaitGen != None:
             self._stallWaitGen  = stallWaitGen
         if errGen != None:
-            self._errGen        = errGen 
+            self._errGen        = errGen
         if datGen != None:
-            self._datGen        = datGen    
+            self._datGen        = datGen
         
-             
-  
-    @coroutine
-    def start_listen(self):
-        if self.busy:
-            yield self.busy_event.wait()
-        self.busy_event.clear()
-        self.busy       = True
-        
-        if hasattr(self.bus, "stall"):
-            cocotb.fork(self._stall())
-        cocotb.fork(self._clk_cycle_counter())         
-        cocotb.fork(self._receive())        
-        self.log.debug("Start listening...")
 
-    @coroutine
-    def stop_listen(self):
-        self.busy = False
-        self.busy_event.set()
-        self.log.debug("Stop listening")
-        yield RisingEdge(self.clock)   
 
     @coroutine 
     def _clk_cycle_counter(self):
@@ -160,84 +147,114 @@ class WishboneSlave(Wishbone):
         """
         clkedge = RisingEdge(self.clock)
         self._clk_cycle_count = 0
-        while self.busy:
+        while True:
+            if self._cycle:
+                self._clk_cycle_count += 1
+            else:
+                self._clk_cycle_count = 0
             yield clkedge
-            self._clk_cycle_count += 1
+            
 
     @coroutine
     def _stall(self):
         clkedge = RisingEdge(self.clock)         
-        while self.busy:
+        while True:
             stall = self._stallWaitGen.next()
-            self.bus.stall.setimmediatevalue(stall)
+            self.bus.stall <= stall
             yield clkedge
         
-
-
     @coroutine
+    def _ack(self):
+        clkedge = RisingEdge(self.clock)         
+        while True:        
+            self.bus.ack <= 0
+            self.bus.err <= 0
+            self.bus.datrd <= 0        
+            if len(self._res_buf):
+                e = self._res_buf.pop()
+                if e.waitack != None:
+                    self.log.debug("AckDelay: %u" % e.waitack)
+                                        
+                    waitcnt = e.waitack
+                    while waitcnt > 0:
+                        waitcnt -= 1
+                        yield clkedge
+                self.bus.ack    <= int(e.ack)
+                self.bus.datrd  <= e.dat
+                if hasattr(self.bus, "err"):
+                    self.bus.err    <= int(not e.ack)
+            yield clkedge
+
+
+
     def _respond(self):
         clkedge = RisingEdge(self.clock)        
-        valid =  self.bus.cyc.getvalue() and self.bus.stb.getvalue()
+        valid =  bool(self.bus.cyc.getvalue()) and bool(self.bus.stb.getvalue())
+        if hasattr(self.bus, "stall"):
+                valid = valid and not bool(self.bus.stall.getvalue())
         
+           
         if valid:
             #if there is a stall signal, take it into account
-            if hasattr(self.bus, "stall"):
-                valid = valid and not self.bus.stall.getvalue()                 
             #wait before replying ?    
             reply = self._replyWaitGen.next()
-                
-            if reply != None:
-                replycnt = reply
-                while replycnt > 0:
-                    replycnt -= 1            
-                    yield clkedge     
-                    
             #Response: rddata/don't care        
             if (not self.bus.we.getvalue()):
                 dat = self._datGen.next()
             else:
                 dat = 0
-            self.bus.dat.setimmediatevalue(dat)
+         
             
             #Response: ack/err
             if hasattr(self.bus, "err"):                
                 err = self._errGen.next()
-                self.bus.err.setimmediatevalue(err)
             else:
                 err = 0
-                
-            self.bus.ack.setimmediatevalue(not err)
+            #we can't do it now, they might be delayed. add to result buffer
+            self._res_buf.append(WishboneRes((not bool(err)), dat, 0, 0, reply))
+    
+        
+            datwr = None
+            if self.bus.we.getvalue():
+                datwr = self.bus.datwr.getvalue()
             
+            idleTime = self._clk_cycle_count - self._lastTime -1
+            print "Now: %s Last: %s diff %s" % (self._clk_cycle_count,  self._lastTime, idleTime)
+            op = WishboneOp(self.bus.adr.getvalue(), datwr, idleTime, self.bus.sel.getvalue())
+            self._lastTime = self._clk_cycle_count
+            self._op_buf.append(op)
+            
+
+           
         
-        yield clkedge
         
-        # save operation
-        datwr = None
-        if self.bus.we.getvalue():
-            datwr = self.bus.datwr.getvalue()
         
-        idleTime = self._clk_cycle_count - self._lastTime  
-        self._res_buf.append(WishboneOp(self.bus.adr.getvalue(), datwr, self.bus.sel.getvalue(), idleTime))
-        self._lastTime = self._clk_cycle_count
+        
         
         
         
     @coroutine
-    def _receive(self):
+    def _monitor_recv(self):
         clkedge = RisingEdge(self.clock)
-        lastCycle = 0       
-        
-        while self.busy:
-            if lastCycle == 0 and self.bus.cyc.getvalue() == 1:
-                self._res_buf = []
+  
+
+        while True:
+            if int(self._cycle) < int(self.bus.cyc.getvalue()):
+                self._lastTime = self._clk_cycle_count
                 
-            self._respond(self)
+            self._respond()
+            if int(self._cycle) > int(self.bus.cyc.getvalue()):
+                self._recv(self._op_buf)
+                self._op_buf = []
+             
             
-            if lastCycle == 1 and self.bus.cyc.getvalue() == 0:
-                self._recv(self._res_buf)
+                
+            self._cycle = self.bus.cyc.getvalue()
+            
             yield clkedge
-            
-        self._recv(self._res_buf)     
+             
+              
+                
             
         
         
