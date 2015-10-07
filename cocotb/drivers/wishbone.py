@@ -37,7 +37,7 @@ import cocotb
 from cocotb.decorators import coroutine
 from cocotb.triggers import RisingEdge, Event
 from cocotb.drivers import BusDriver
-from cocotb.result import ReturnValue
+from cocotb.result import ReturnValue, TestFailure
 from cocotb import wishbone_aux as wba
 
 
@@ -80,15 +80,19 @@ class WishboneMaster(Wishbone):
     _aux_buf         = [] # save read/write order
     _op_cnt         = 0 # number of ops we've been issued
     _clk_cycle_count = 0
-    
+    _timeout = None
 
     
-    def __init__(self, entity, name, clock):
+    def __init__(self, entity, name, clock, timeout=5000):
         Wishbone.__init__(self, entity, name, clock)
-        self.log.info("Wishbone Master created")
+        sTo = ", no cycle timeout"        
+        if not (timeout is None):
+            sTo = ", cycle timeout is %u clockcycles" % timeout
+        self.log.info("Wishbone Master created%s" % sTo)
         self.busy_event = Event("%s_busy" % name)
         self.busy = False
-  
+        self._timeout = timeout
+        
   
     @coroutine
     def _open_cycle(self):
@@ -107,9 +111,21 @@ class WishboneMaster(Wishbone):
         
     @coroutine    
     def _close_cycle(self):
+        clkedge = RisingEdge(self.clock)
+        count = 0
+        last_acked_ops = 0
         while self._acked_ops < self._op_cnt:
-            self.log.debug("Waiting for missing acks: %u/%u" % (self._acked_ops, self._op_cnt) )
-            yield RisingEdge(self.clock)
+            if last_acked_ops != self._acked_ops:
+                self.log.debug("Waiting for missing acks: %u/%u" % (self._acked_ops, self._op_cnt) )
+            last_acked_ops = self._acked_ops    
+            #check for timeout when finishing the cycle            
+            count += 1
+            if (not (self._timeout is None)):
+                if (count > self._timeout): 
+                    raise TestFailure("Timeout of %u clock cycles reached when waiting for reply from slave" % self._timeout)                
+            yield clkedge
+            
+            
         self.busy = False
         self.busy_event.set()
         self.bus.cyc <= 0 
@@ -126,11 +142,12 @@ class WishboneMaster(Wishbone):
     def _wait_stall(self):
         """Wait for stall to be low before continuing
         """
+        clkedge = RisingEdge(self.clock)
         count = 0
         if hasattr(self.bus, "stall"):
             count = 0            
             while self.bus.stall.getvalue():
-                yield RisingEdge(self.clock)
+                yield clkedge
                 count += 1
             self.log.debug("Stalled for %u cycles" % count)
         raise ReturnValue(count)
@@ -145,7 +162,7 @@ class WishboneMaster(Wishbone):
             while not self.is_reply_valid():
                 yield clkedge
                 count += 1
-            self.log.debug("Waiting %u cycles for ACK" % count)
+            self.log.debug("Waited %u cycles for ACK" % count)
         raise ReturnValue(count)    
     
     @coroutine 
@@ -171,6 +188,8 @@ class WishboneMaster(Wishbone):
         while self.busy:
             yield clkedge
             self._clk_cycle_count += 1
+           
+                
 
     @coroutine
     def _drive(self, we, adr, dat, sel, idle):

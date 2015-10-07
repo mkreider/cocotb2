@@ -1,8 +1,8 @@
 ###################################
 ## enter your project details here
-testmodule  = "test_wb"
+testmodule  = "test_wb_loopback"
 testcase    = ""
-top_module  = "cocotb_bus"
+top_module  = "cocotb_wb_loopback"
 ##################################
 
 target         = "altera"

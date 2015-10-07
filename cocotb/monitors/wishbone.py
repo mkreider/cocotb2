@@ -199,7 +199,6 @@ class WishboneSlave(Wishbone):
             #Response: ack/err
             if hasattr(self.bus, "err"):                
                 err = self._errGen.next()
-                print "ERRGEN: %u" % err
             else:
                 err = 0
             #we can't do it now, they might be delayed. add to result buffer

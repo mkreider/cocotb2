@@ -78,7 +78,7 @@ class rec():
         
 
 @cocotb.test()
-def test_wb(dut):
+def test_wb_looback(dut):
     clkref_period = 8
     clksys_period = 16
     
@@ -105,7 +105,7 @@ def test_wb(dut):
     idleGenWord     = genw.random_data(0, 5)
     replyWaitGen     = genw.random_data(1, 10)
     idleGenBlock    = genw.random_data(0, 50)
-    stallGen        = genb.bit_toggler(genw.random_data(2, 5), genw.random_data(5, 10))
+    stallGen        = genb.bit_toggler(genw.random_data(1, 10), genw.random_data(1, 10))
     cntGenX1000     = genw.incrementing_data(0x1000)
     cntGen          = genw.incrementing_data(1)
     stdExp          = WBR(True, None, 6, 5, 5)    
@@ -119,9 +119,9 @@ def test_wb(dut):
     output = rec(dut)
     
     wbm  = WishboneMaster(dut, "wbm", dut.clk)
-    wbm.log.setLevel(logging.DEBUG)
+    wbm.log.setLevel(logging.INFO)
     
-    wbs  = WishboneSlave(entity=dut, name="wbmo", clock=dut.clk, callback=output.receive, errgen=errGen, datgen=datGen, stallwaitgen=stallGen, replywaitgen=replyWaitGen)
+    wbs  = WishboneSlave(entity=dut, name="wbmo", clock=dut.clk, callback=output.receive, errgen=None, datgen=datGen, stallwaitgen=stallGen, replywaitgen=replyWaitGen)
     wbs.log.setLevel(logging.INFO)    
     
     oplist = []
@@ -158,7 +158,7 @@ def test_wb(dut):
 #        explist.append(tmpExplist)
    
     
-    for i in range(1, 10):
+    for i in range(0, 10):
         tmpOplist = []
         words = wordRepeatGen.next()        
         for i in range(0, words):        
