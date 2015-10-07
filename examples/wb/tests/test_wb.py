@@ -27,21 +27,16 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. '''
 ''' extremely modified ping example - Mathias Kreider March 2015 '''
 
 import time
-import random
 import logging
-import sys
-import fcntl
 import os
-import struct
-import subprocess
-import thread
 
 import cocotb
 from cocotb.decorators import coroutine
+from cocotb.generators import *
 from cocotb.clock import Clock
 from cocotb.triggers import Timer, RisingEdge
-from cocotb.drivers.wishbone import WishboneOp as WBO
-from cocotb.drivers.wishbone import WishboneRes as WBR
+from cocotb.wishbone_aux import WishboneOp as WBO
+from cocotb.wishbone_aux import WishboneRes as WBR
 from cocotb.drivers.wishbone import WishboneMaster
 from cocotb.monitors.wishbone import WishboneSlave
 import cocotb.generators.word as genw
@@ -57,37 +52,29 @@ def input_thread(L):
 
 class rec():
     cntcyc = 0
-    def __init__(self):
+    firsttime = True
+    dut = None
+    
+    def __init__(self, dut):
         self.cntcyc = 0
+        self.dut = dut
         
     def receive(self, result):
-        print "Cycle #%3u" % (self.cntcyc)
+        if self.firsttime:
+            self.firsttime = False
+            self.dut.log.debug("****** Slave - Received Operations:")
+            
+        self.dut.log.debug("WBS Cycle #%3u" % (self.cntcyc))
         self.cntcyc += 1
         cnt = 0
         for op in result:
-            print ("#%3u ADR: %s DAT: %s IDLW: %u SEL: 0x%x" % (cnt, op.adr, op.dat, op.idle, op.sel))
+            dat = "      None"
+            if op.dat is not None:
+                dat = "0x%08x" % op.dat            
+            self.dut.log.debug("#%3u ADR: 0x%08x DAT: %s IDLW: %3u SEL: 0x%x" % (cnt, op.adr, dat, op.idle, op.sel))
             cnt += 1
 
-def bit_flip(gen_on, gen_off):
-    """Combines two generators to provide cycles_on, cycles_off tuples
 
-    Args:
-        gen_on (generator): generator that yields number of cycles on
-
-        gen_off (generator): generator that yields number of cycles off
-    """
-    
-    while True:
-        
-        bits=[]
-        highCnt = int(abs(next(gen_on)))
-        for i in range(0, highCnt):
-           bits.append(1)
-        lowCnt = int(abs(next(gen_off)))           
-        for i in range(0, lowCnt):
-           bits.append(0)
-        for bit in bits:
-            yield bit
         
 
 @cocotb.test()
@@ -114,26 +101,27 @@ def test_wb(dut):
     yield RisingEdge(dut.clk2)
     dut.reset_n2 <= 1
     dut.log.debug("Out of reset")
-    
+    dut.log.setLevel(logging.DEBUG)
     
     print "Seed: %s" % os.getenv('RANDOM_SEED')
 
     tsGen           = genw.random_data(0, 1000, 64)
     idleGenWord     = genw.random_data(0, 5)
-    replyWaitGen     = genw.random_data(0, 5)
-    idleGenBlock    = genw.random_data(5, 50)
-    stallGen        = bit_flip(genw.random_data(2, 5), genw.random_data(5, 10))
+    replyWaitGen     = genw.random_data(2, 3)
+    idleGenBlock    = genw.random_data(0, 50)
+    stallGen        = genb.bit_toggler(genw.random_data(2, 5), genw.random_data(5, 10))
     cntGenX1000     = genw.incrementing_data(0x1000)
     cntGen          = genw.incrementing_data(1)
     stdExp          = WBR(True, None, 6, 5, 5)    
     datGen          = genw.incrementing_data(1)
+    errGen          = genb.bit_toggler(genw.random_data(0, 1), genw.random_data(1, 10))
     
-    output = rec()
+    output = rec(dut)
     
     wbm  = WishboneMaster(dut, "wbm", dut.clk)
-    wbm.log.setLevel(logging.DEBUG)
+    wbm.log.setLevel(logging.INFO)
     
-    wbs  = WishboneSlave(entity=dut, name="wbmo", clock=dut.clk, callback=output.receive, datgen=datGen, stallwaitgen=stallGen, replywaitgen=replyWaitGen)
+    wbs  = WishboneSlave(entity=dut, name="wbmo", clock=dut.clk, callback=output.receive, errgen=errGen, datgen=datGen, stallwaitgen=stallGen, replywaitgen=replyWaitGen)
     wbs.log.setLevel(logging.INFO)    
     
     oplist = []
@@ -177,15 +165,23 @@ def test_wb(dut):
     
     yield RisingEdge(dut.clk)
    
-    print "Reply:"   
+    dut.log.debug("***** Master - Received Replies:")
     cyccnt = 0    
     
     for cycle in reslist:
-        print "Cycle #%3u" % (cyccnt)
+        dut.log.debug("WBM Cycle #%3u" % (cyccnt))
         cyccnt += 1
         cnt = 0
         for res in cycle:
-            print ("#%3u ACK: %s RD: %s IDLW: %u STLW: %u ACKW: %u" % (cnt, res.ack, res.dat, res.waitidle, res.waitstall, res.waitack))
+            dat = "      None"
+            if res.dat is not None:
+                dat = "0x%08x" % res.dat
+
+            ackerr = "ERR"                
+            if res.ack:
+                ackerr = "ACK"
+                
+            dut.log.debug("#%3u ACK/ERR: %s RD: %s IDLW: %3u STLW: %3u ACKW: %3u" % (cnt, ackerr, dat, res.waitidle, res.waitstall, res.waitack))
             cnt += 1
 #    yield RisingEdge(dut.clk)
   

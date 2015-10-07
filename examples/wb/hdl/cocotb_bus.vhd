@@ -32,9 +32,9 @@ entity cocotb_bus is
                 wbmo_datrd : in std_logic_vector(31 downto 0);
                 wbmo_datwr : out std_logic_vector(31 downto 0);
 
+                wbmo_err: in std_logic;
                 wbmo_stall: in std_logic;
-                wbmo_ack: in std_logic;
-                wbmo_err: in std_logic
+                wbmo_ack: in std_logic
 
   
 		);
@@ -62,6 +62,8 @@ begin
 	wbm_datrd <= s_master_in.dat;
 	wbm_ack <= s_master_in.ack;
 	wbm_stall <= s_master_in.stall;
+	wbm_err <= s_master_in.err;
+
 
 	wbmo_we  <= s_master_out.we;
         wbmo_stb <= s_master_out.stb;
@@ -72,6 +74,7 @@ begin
 
         s_master_in.dat <= wbmo_datrd;
         s_master_in.ack <= wbmo_ack;
+	s_master_in.err <= wbmo_err;
         s_master_in.stall <= wbmo_stall;	
 
 --	main : process(clk)

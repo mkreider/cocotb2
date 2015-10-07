@@ -33,9 +33,9 @@ NB Currently we only support a very small subset of functionality
 """
 import cocotb
 from cocotb.decorators import coroutine
-from cocotb.utils import hexdump
 from cocotb.monitors import BusMonitor
-from cocotb.triggers import RisingEdge, ReadOnly
+from cocotb.triggers import RisingEdge
+from cocotb import wishbone_aux as wba
 
 
 def is_sequence(arg):
@@ -43,32 +43,6 @@ def is_sequence(arg):
         hasattr(arg, "__getitem__") or
         hasattr(arg, "__iter__"))
 
-
-class WishboneRes():
-    dat = None
-    ack = False
-    waitstall = 0
-    waitack = 0
-    waitidle = 0
-    
-    def __init__(self, ack, dat, idles, stalled, waitack):
-        self.ack        = ack        
-        self.dat        = dat
-        self.waitstall  = stalled
-        self.waitack    = waitack
-        self.waitidle   = idles
-        
-class WishboneOp():
-    adr     = 0
-    sel     = 0xf     
-    dat     = 0
-    idle    = 0
-    
-    def __init__(self, adr, dat=None, idle=0, sel=0xf):
-        self.adr    = adr        
-        self.dat    = dat
-        self.sel    = sel
-        self.idle   = idle
 
 class Wishbone(BusMonitor):
     """Wishbone
@@ -101,12 +75,32 @@ class Wishbone(BusMonitor):
 class WishboneSlave(Wishbone):
     """Wishbone slave
     """
+    
+    def bitSeqGen(self, tupleGen):
+        while True: 
+            [highCnt, lowCnt] = tupleGen.next()
+                #make sure there's something in here            
+            if lowCnt < 1:
+                lowCnt = 1
+            bits=[]
+            for i in range(0, highCnt):
+               bits.append(1)          
+            for i in range(0, lowCnt):
+               bits.append(0)
+            for bit in bits:
+                yield bit
+    
+    
+    def defaultTupleGen():
+        while True:        
+            yield int(0), int(1)      
+    
     def defaultGen():
         while True:        
-            yield int(0)    
+            yield int(0)   
     
     _acked_ops      = 0  # ack cntr. comp with opbuf len. wait for equality before releasing lock
-    _op_buf        = [] # save datwr, sel, idle
+    _op_buf         = [] # save datwr, sel, idle
     _res_buf        = [] # save readdata/ack/err
     _clk_cycle_count = 0
     _cycle = False
@@ -123,7 +117,6 @@ class WishboneSlave(Wishbone):
         errGen = kwargs.pop('errgen', None)
         replyWaitGen = kwargs.pop('replywaitgen', None)
         stallWaitGen = kwargs.pop('stallwaitgen', None)
-        print datGen
         Wishbone.__init__(self, *args, **kwargs)
         cocotb.fork(self._stall())
         cocotb.fork(self._clk_cycle_counter())
@@ -133,14 +126,13 @@ class WishboneSlave(Wishbone):
         if replyWaitGen != None:
             self._replyWaitGen  = replyWaitGen 
         if stallWaitGen != None:
-            self._stallWaitGen  = stallWaitGen
+            self._stallWaitGen  = self.bitSeqGen(stallWaitGen)
         if errGen != None:
-            self._errGen        = errGen
+            self._errGen        = self.bitSeqGen(errGen)
         if datGen != None:
             self._datGen        = datGen
         
-
-
+    
     @coroutine 
     def _clk_cycle_counter(self):
         """
@@ -159,22 +151,24 @@ class WishboneSlave(Wishbone):
     def _stall(self):
         clkedge = RisingEdge(self.clock)         
         while True:
-            stall = self._stallWaitGen.next()
-            self.bus.stall <= stall
+            if hasattr(self.bus, "stall"):
+                self.bus.stall <= self._stallWaitGen.next()
             yield clkedge
+            
         
     @coroutine
     def _ack(self):
         clkedge = RisingEdge(self.clock)         
         while True:        
-            self.bus.ack <= 0
-            self.bus.err <= 0
-            self.bus.datrd <= 0        
+            self.bus.ack    <= 0
+            self.bus.datrd  <= 0
+            if hasattr(self.bus, "err"):
+                self.bus.err <= 0
+            
             if len(self._res_buf):
                 e = self._res_buf.pop()
                 if e.waitack != None:
                     self.log.debug("AckDelay: %u" % e.waitack)
-                                        
                     waitcnt = e.waitack
                     while waitcnt > 0:
                         waitcnt -= 1
@@ -188,12 +182,10 @@ class WishboneSlave(Wishbone):
 
 
     def _respond(self):
-        clkedge = RisingEdge(self.clock)        
         valid =  bool(self.bus.cyc.getvalue()) and bool(self.bus.stb.getvalue())
         if hasattr(self.bus, "stall"):
                 valid = valid and not bool(self.bus.stall.getvalue())
         
-           
         if valid:
             #if there is a stall signal, take it into account
             #wait before replying ?    
@@ -204,35 +196,25 @@ class WishboneSlave(Wishbone):
             else:
                 dat = 0
          
-            
             #Response: ack/err
             if hasattr(self.bus, "err"):                
                 err = self._errGen.next()
+                print "ERRGEN: %u" % err
             else:
                 err = 0
             #we can't do it now, they might be delayed. add to result buffer
-            self._res_buf.append(WishboneRes((not bool(err)), dat, 0, 0, reply))
-    
-        
+            self._res_buf.append(wba.WishboneRes((not bool(err)), dat, 0, 0, reply))
             datwr = None
             if self.bus.we.getvalue():
                 datwr = self.bus.datwr.getvalue()
-            
+            #get the time the master idled since the last operation
+            #TODO: subtract our own stalltime or, if we're not pipelined, time since last ack
             idleTime = self._clk_cycle_count - self._lastTime -1
-            print "Now: %s Last: %s diff %s" % (self._clk_cycle_count,  self._lastTime, idleTime)
-            op = WishboneOp(self.bus.adr.getvalue(), datwr, idleTime, self.bus.sel.getvalue())
+            op = wba.WishboneOp(self.bus.adr.getvalue(), datwr, idleTime, self.bus.sel.getvalue())
             self._lastTime = self._clk_cycle_count
             self._op_buf.append(op)
             
 
-           
-        
-        
-        
-        
-        
-        
-        
     @coroutine
     def _monitor_recv(self):
         clkedge = RisingEdge(self.clock)
@@ -240,23 +222,12 @@ class WishboneSlave(Wishbone):
 
         while True:
             if int(self._cycle) < int(self.bus.cyc.getvalue()):
-                self._lastTime = self._clk_cycle_count
+                self._lastTime = self._clk_cycle_count -1
                 
             self._respond()
             if int(self._cycle) > int(self.bus.cyc.getvalue()):
                 self._recv(self._op_buf)
                 self._op_buf = []
              
-            
-                
             self._cycle = self.bus.cyc.getvalue()
-            
             yield clkedge
-             
-              
-                
-            
-        
-        
-        
-        
