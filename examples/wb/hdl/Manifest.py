@@ -1,4 +1,5 @@
 files = [
-          "cocotb_bus.vhd",
+          "cocotb_prio2.vhd",
 	  "cocotb_wb_loopback.vhd",
+	  
 ]

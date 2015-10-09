@@ -149,6 +149,9 @@ class WishboneMaster(Wishbone):
             while self.bus.stall.getvalue():
                 yield clkedge
                 count += 1
+                if (not (self._timeout is None)):
+                    if (count > self._timeout): 
+                        raise TestFailure("Timeout of %u clock cycles reached when on stall from slave" % self._timeout)                
             self.log.debug("Stalled for %u cycles" % count)
         raise ReturnValue(count)
     
