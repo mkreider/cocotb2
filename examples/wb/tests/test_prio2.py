@@ -156,23 +156,6 @@ def datagen(dut, wbm, messages):
          
 
 
-@coroutine
-def engen(dut):
-    clkedge = RisingEdge(dut.clk)
-    wait = genw.random_data(1, 50)
-    count = 1
-    lastValid = False
-    while True:
-        
-        dut.en_in <= 0
-        
-        if bool(dut.ts_valid_out.getvalue()) and not lastValid:
-            yield clkedge #Timer(wait.next()*clksys_period)
-            print "Get Message %u" % count
-            count += 1 
-            dut.en_in <= 1
-        lastValid = bool(dut.ts_valid_out.getvalue())   
-        yield clkedge        
 
         
 @coroutine
@@ -202,7 +185,7 @@ def test_prio2(dut):
     global cnt_plan
 
     ##### Test Global Parameters    
-    messages = 500   
+    messages = 20   
     cnt_plan = 8*messages 
     
     dut.log.setLevel(logging.INFO)
@@ -224,13 +207,12 @@ def test_prio2(dut):
     dut.reset_n2    <= 1
     yield Timer(50*clksys_period)
     
-    #Stimulus routine. Request outgoing packet on valid Timestamp 
-    cocotb.fork(engen(dut))
-    #Timestamp capture routine. Save TSs to compare later against expected values    
+   #Timestamp capture routine. Save TSs to compare later against expected values    
     cocotb.fork(tscheck(dut))   
     
     #Data/Signal Generators for WB Slave
     replyWaitGen    = genw.random_data(1, 3)
+    ackGen          = genw.random_data(0, 1)
     stallGen        = genb.bit_toggler(genw.random_data(0, 10), genw.random_data(1, 50))
     #Callback for WB SLave
     output = rec(dut)

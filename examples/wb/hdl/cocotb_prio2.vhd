@@ -105,9 +105,7 @@ begin
     slave_o     => s_slave_out,
 
     ts_o        => ts_out,
-    ts_valid_o  => ts_valid_out,
-
-    sel_i       => en_in
+    ts_valid_o  => ts_valid_out
 
   );
 
