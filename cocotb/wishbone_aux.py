@@ -26,6 +26,8 @@ class WishboneRes():
     waitack = 0
     waitidle = 0
     
+          
+    
     def __init__(self, ack, dat, idles, stalled, waitack):
         self.ack        = ack        
         self.dat        = dat
@@ -48,4 +50,6 @@ class WishboneOp():
 def is_sequence(arg):
         return (not hasattr(arg, "strip") and
         hasattr(arg, "__getitem__") or
-        hasattr(arg, "__iter__"))        
+        hasattr(arg, "__iter__"))
+
+replyTypes = {0 : "ack", 1 : "err", 2 : "rty"}           

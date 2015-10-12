@@ -1,41 +1,12 @@
-''' Copyright (c) 2013 Potential Ventures Ltd
-Copyright (c) 2013 SolarFlare Communications Inc
-All rights reserved.
 
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-    * Redistributions of source code must retain the above copyright
-      notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-      notice, this list of conditions and the following disclaimer in the
-      documentation and/or other materials provided with the distribution.
-    * Neither the name of Potential Ventures Ltd,
-      SolarFlare Communications Inc nor the
-      names of its contributors may be used to endorse or promote products
-      derived from this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL POTENTIAL VENTURES LTD BE LIABLE FOR ANY
-DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
-(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
-ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. '''
-"""
-Monitors for Altera Avalon interfaces.
-
-See http://www.altera.co.uk/literature/manual/mnl_avalon_spec.pdf
-
-NB Currently we only support a very small subset of functionality
-"""
 import cocotb
 from cocotb.decorators import coroutine
 from cocotb.monitors import BusMonitor
 from cocotb.triggers import RisingEdge
-from cocotb import wishbone_aux as wba
+from cocotb.wishbone_aux import WishboneRes as wbr
+from cocotb.wishbone_aux import WishboneOp as wbo
+from cocotb.wishbone_aux import replyTypes
+from cocotb.result import TestFailure
 
 
 def is_sequence(arg):
@@ -50,7 +21,7 @@ class Wishbone(BusMonitor):
     _width = 32
     
     _signals = ["cyc", "stb", "we", "sel", "adr", "datwr", "datrd", "ack"]
-    _optional_signals = ["err", "stall"]
+    _optional_signals = ["err", "stall", "rty"]
 
 
     def __init__(self, *args, **kwargs):
@@ -99,13 +70,13 @@ class WishboneSlave(Wishbone):
         while True:        
             yield int(0)   
     
-    _acked_ops      = 0  # ack cntr. comp with opbuf len. wait for equality before releasing lock
+    _acked_ops      = 0  # ack cntr. wait for equality with number of Ops before releasing lock
     _op_buf         = [] # save datwr, sel, idle
-    _res_buf        = [] # save readdata/ack/err
+    _res_buf        = [] # save readdata/ack/err/rty
     _clk_cycle_count = 0
     _cycle = False
     _datGen         = defaultGen()
-    _errGen         = defaultGen()
+    _ackGen         = defaultGen()
     _stallWaitGen   = defaultGen()
     _replyWaitGen   = defaultGen()
     _lastTime      = 0
@@ -114,7 +85,7 @@ class WishboneSlave(Wishbone):
 
     def __init__(self, *args, **kwargs):
         datGen = kwargs.pop('datgen', None)
-        errGen = kwargs.pop('errgen', None)
+        ackGen = kwargs.pop('ackgen', None)
         replyWaitGen = kwargs.pop('replywaitgen', None)
         stallWaitGen = kwargs.pop('stallwaitgen', None)
         Wishbone.__init__(self, *args, **kwargs)
@@ -127,8 +98,8 @@ class WishboneSlave(Wishbone):
             self._replyWaitGen  = replyWaitGen 
         if stallWaitGen != None:
             self._stallWaitGen  = self.bitSeqGen(stallWaitGen)
-        if errGen != None:
-            self._errGen        = self.bitSeqGen(errGen)
+        if ackGen != None:
+            self._ackGen        = ackGen
         if datGen != None:
             self._datGen        = datGen
         
@@ -164,6 +135,8 @@ class WishboneSlave(Wishbone):
             self.bus.datrd  <= 0
             if hasattr(self.bus, "err"):
                 self.bus.err <= 0
+            if hasattr(self.bus, "rty"):
+                self.bus.rty <= 0        
             
             if len(self._res_buf):
                 e = self._res_buf.pop()
@@ -173,10 +146,17 @@ class WishboneSlave(Wishbone):
                     while waitcnt > 0:
                         waitcnt -= 1
                         yield clkedge
-                self.bus.ack    <= int(e.ack)
+                if not hasattr(self.bus, replyTypes[e.ack]):                
+                    raise TestFailure("Tried to assign <%s> (%u) to slave reply, but this slave does not have a <%s> line" % (replyTypes[e.ack], e.ack, replyTypes[e.ack]))
+                     
+                if replyTypes[e.ack]    == "ack":
+                    self.bus.ack    <= 1
+                elif replyTypes[e.ack]  == "err":
+                    self.bus.err    <= 1
+                elif replyTypes[e.ack]  == "rty":
+                    self.bus.rty    <= 1
+               
                 self.bus.datrd  <= e.dat
-                if hasattr(self.bus, "err"):
-                    self.bus.err    <= int(not e.ack)
             yield clkedge
 
 
@@ -189,27 +169,27 @@ class WishboneSlave(Wishbone):
         if valid:
             #if there is a stall signal, take it into account
             #wait before replying ?    
-            reply = self._replyWaitGen.next()
+            replyWait = self._replyWaitGen.next()
             #Response: rddata/don't care        
             if (not self.bus.we.getvalue()):
                 dat = self._datGen.next()
             else:
                 dat = 0
          
-            #Response: ack/err
-            if hasattr(self.bus, "err"):                
-                err = self._errGen.next()
-            else:
-                err = 0
+            #Response: ack/err/rty
+            ack = self._ackGen.next()
+            if ack not in replyTypes:
+                raise TestFailure("Tried to assign unknown reply type (%u) to slave reply. Valid is 0-2 (ack, err, rty)" %  ack)
+                       
             #we can't do it now, they might be delayed. add to result buffer
-            self._res_buf.append(wba.WishboneRes((not bool(err)), dat, 0, 0, reply))
+            self._res_buf.append(wbr(ack, dat, 0, 0, replyWait))
             datwr = None
             if self.bus.we.getvalue():
                 datwr = self.bus.datwr.getvalue()
             #get the time the master idled since the last operation
             #TODO: subtract our own stalltime or, if we're not pipelined, time since last ack
             idleTime = self._clk_cycle_count - self._lastTime -1
-            op = wba.WishboneOp(self.bus.adr.getvalue(), datwr, idleTime, self.bus.sel.getvalue())
+            op = wbo(self.bus.adr.getvalue(), datwr, idleTime, self.bus.sel.getvalue())
             self._lastTime = self._clk_cycle_count
             self._op_buf.append(op)
             
@@ -218,7 +198,7 @@ class WishboneSlave(Wishbone):
     def _monitor_recv(self):
         clkedge = RisingEdge(self.clock)
   
-
+        #respong and notify the callback function  
         while True:
             if int(self._cycle) < int(self.bus.cyc.getvalue()):
                 self._lastTime = self._clk_cycle_count -1

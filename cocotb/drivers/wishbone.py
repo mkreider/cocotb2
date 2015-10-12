@@ -1,36 +1,3 @@
-''' Copyright (c) 2013 Potential Ventures Ltd
-Copyright (c) 2013 SolarFlare Communications Inc
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-    * Redistributions of source code must retain the above copyright
-      notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-      notice, this list of conditions and the following disclaimer in the
-      documentation and/or other materials provided with the distribution.
-    * Neither the name of Potential Ventures Ltd,
-      SolarFlare Communications Inc nor the
-      names of its contributors may be used to endorse or promote products
-      derived from this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL POTENTIAL VENTURES LTD BE LIABLE FOR ANY
-DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
-(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
-ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. '''
-"""
-Drivers for Altera Avalon interfaces.
-
-See http://www.altera.co.uk/literature/manual/mnl_avalon_spec.pdf
-
-NB Currently we only support a very small subset of functionality
-"""
 
 
 import cocotb
@@ -38,13 +5,9 @@ from cocotb.decorators import coroutine
 from cocotb.triggers import RisingEdge, Event
 from cocotb.drivers import BusDriver
 from cocotb.result import ReturnValue, TestFailure
-from cocotb import wishbone_aux as wba
-
-
-
-
-
-        
+from cocotb.wishbone_aux import WishboneAux as wba
+from cocotb.wishbone_aux import WishboneRes as wbr
+from cocotb.wishbone_aux import is_sequence     
   
 
 class Wishbone(BusDriver):
@@ -53,7 +16,7 @@ class Wishbone(BusDriver):
     _width = 32
     
     _signals = ["cyc", "stb", "we", "sel", "adr", "datwr", "datrd", "ack"]
-    _optional_signals = ["err", "stall"]
+    _optional_signals = ["err", "stall", "rty"]
 
 
     def __init__(self, entity, name, clock):
@@ -75,12 +38,12 @@ class Wishbone(BusDriver):
 class WishboneMaster(Wishbone):
     """Wishbone master
     """
-    _acked_ops      = 0  # ack cntr. comp with opbuf len. wait for equality before releasing lock
-    _res_buf        = [] # save readdata/ack/err
-    _aux_buf         = [] # save read/write order
-    _op_cnt         = 0 # number of ops we've been issued
-    _clk_cycle_count = 0
-    _timeout = None
+    _acked_ops          = 0  # ack cntr. comp with opbuf len. wait for equality before releasing lock
+    _res_buf            = [] # save readdata/ack/err
+    _aux_buf            = [] # save read/write order
+    _op_cnt             = 0 # number of ops we've been issued
+    _clk_cycle_count    = 0
+    _timeout            = None
 
     
     def __init__(self, entity, name, clock, timeout=5000):
@@ -93,11 +56,22 @@ class WishboneMaster(Wishbone):
         self.busy = False
         self._timeout = timeout
         
+    @coroutine 
+    def _clk_cycle_counter(self):
+        """
+            Cycle counter to time bus operations
+        """
+        clkedge = RisingEdge(self.clock)
+        self._clk_cycle_count = 0
+        while self.busy:
+            yield clkedge
+            self._clk_cycle_count += 1    
   
     @coroutine
     def _open_cycle(self):
+        #Open new wishbone cycle        
         if self.busy:
-            self.log.debug("This should not be busy !!!")
+            self.log.error("Opening Cycle, but WB Driver is already busy. Someting's wrong")
             yield self.busy_event.wait()
         self.busy_event.clear()
         self.busy       = True
@@ -111,9 +85,13 @@ class WishboneMaster(Wishbone):
         
     @coroutine    
     def _close_cycle(self):
+        #Close current wishbone cycle  
         clkedge = RisingEdge(self.clock)
-        count = 0
-        last_acked_ops = 0
+        count           = 0
+        last_acked_ops  = 0
+        #Wait for all Operations being acknowledged by the slave before lowering the cycle line
+        #This is not mandatory by the bus standard, but a crossbar might send acks to the wrong master
+        #if we don't wait. We don't want to risk that, it could hang the bus
         while self._acked_ops < self._op_cnt:
             if last_acked_ops != self._acked_ops:
                 self.log.debug("Waiting for missing acks: %u/%u" % (self._acked_ops, self._op_cnt) )
@@ -125,19 +103,13 @@ class WishboneMaster(Wishbone):
                     raise TestFailure("Timeout of %u clock cycles reached when waiting for reply from slave" % self._timeout)                
             yield clkedge
             
-            
         self.busy = False
         self.busy_event.set()
         self.bus.cyc <= 0 
         self.log.debug("Closing cycle")
-        yield RisingEdge(self.clock)        
+        yield clkedge        
 
-    def is_reply_valid(self):
-        valid = bool(self.bus.ack.getvalue())
-        if hasattr(self.bus, "err"):
-            valid = valid or bool(self.bus.err.getvalue())
-        return valid    
-
+    
     @coroutine
     def _wait_stall(self):
         """Wait for stall to be low before continuing
@@ -155,91 +127,97 @@ class WishboneMaster(Wishbone):
             self.log.debug("Stalled for %u cycles" % count)
         raise ReturnValue(count)
     
+    
     @coroutine
     def _wait_ack(self):
         """Wait for ACK on the bus before continuing
         """
+        #wait for acknownledgement before continuing - Classic Wishbone without pipelining
         clkedge = RisingEdge(self.clock)
         count = 0
         if not hasattr(self.bus, "stall"):
             while not self.is_reply_valid():
                 yield clkedge
                 count += 1
-            self.log.debug("Waited %u cycles for ACK" % count)
+            self.log.debug("Waited %u cycles for ackknowledge" % count)
         raise ReturnValue(count)    
+    
+    
+    def is_reply_valid(self):
+        #helper function for slave acks            
+        valid = bool(self.bus.ack.getvalue())
+        if hasattr(self.bus, "err"):
+            valid = valid or bool(self.bus.err.getvalue())
+        if hasattr(self.bus, "rty"):
+            valid = valid or bool(self.bus.rty.getvalue())    
+        return valid 
+        
     
     @coroutine 
     def _read(self):
         """
+            Reader for slave replies
         """
         count = 0
         clkedge = RisingEdge(self.clock)
         while self.busy:
             if(self.is_reply_valid()):
                 val = int(self.bus.datrd.getvalue())
-                self._res_buf.append(wba.WishboneRes(bool(self.bus.ack.getvalue()), val, None, None, self._clk_cycle_count))
+                #append reply and meta info to result buffer
+                self._res_buf.append(wbr(bool(self.bus.ack.getvalue()), val, None, None, self._clk_cycle_count))
                 self._acked_ops += 1
             yield clkedge
             count += 1    
 
-    @coroutine 
-    def _clk_cycle_counter(self):
-        """
-        """
-        clkedge = RisingEdge(self.clock)
-        self._clk_cycle_count = 0
-        while self.busy:
-            yield clkedge
-            self._clk_cycle_count += 1
-           
-                
-
+    
     @coroutine
     def _drive(self, we, adr, dat, sel, idle):
         """
-        Args:
-            string (str): A string of bytes to send over the bus
+            Drive the Wishbone Master Out Lines
         """
-        # Avoid spurious object creation by recycling
-        #print "Driver"
+    
         clkedge = RisingEdge(self.clock)
         if self.busy:
+            # insert requested idle cycles            
             if idle != None:
                 idlecnt = idle
                 while idlecnt > 0:
                     idlecnt -= 1
                     yield clkedge
-                
+            # drive outputs    
             self.bus.stb    <= 1
             self.bus.adr    <= adr
             self.bus.sel    <= sel
             self.bus.datwr  <= dat
             self.bus.we     <= we
             yield clkedge
-            #deal with a current read (pipelined only)
+            #deal with flow control (pipelined wishbone)
             stalled = yield self._wait_stall()
-            self._aux_buf.append(wba.WishboneAux(we, sel, stalled, idle, self._clk_cycle_count))
-            
-            #print self._aux_buf
+            #append operation and meta info to auxiliary buffer
+            self._aux_buf.append(wba(we, sel, stalled, idle, self._clk_cycle_count))
+            #reset strobe and write enable without advancing time
             self.bus.stb    <= 0
             self.bus.we     <= 0
-            # non pipelined
+            # non pipelined wishbone
             yield self._wait_ack()
         else:
-           self.log.error("Cannot drive bus outside cycle")
+           self.log.error("Cannot drive the Wishbone bus outside a cycle!")
 
 
   
     @coroutine
     def send_cycle(self, arg):
         """
+            The main sending routine        
+        
         Args:
-            list(WishboneOp)
+            list(WishboneOperations)
+            
         """
         cnt = 0
         clkedge = RisingEdge(self.clock)
         yield clkedge
-        if wba.is_sequence(arg):
+        if is_sequence(arg):
             if len(arg) < 1:
                 self.log.error("List contains no operations to carry out")
             else:
@@ -253,25 +231,26 @@ class WishboneMaster(Wishbone):
                         yield self._open_cycle()
                         
                     if op.dat != None:
-                        we = 1
+                        we  = 1
                         dat = op.dat
                     else:
-                        we = 0
+                        we  = 0
                         dat = 0
                     yield self._drive(we, op.adr, dat, op.sel, op.idle)
                     self.log.debug("#%3u WE: %s ADR: 0x%08x DAT: 0x%08x SEL: 0x%1x IDLE: %3u" % (cnt, we, op.adr, dat, op.sel, op.idle))
                     cnt += 1
                 yield self._close_cycle()
                 
+                #do pick and mix from result- and auxiliary buffer so we get all meta info
                 for res, op in zip(self._res_buf, self._aux_buf):
                     val = res.dat
                     if op.we:
                         val = None
-                    result.append(wba.WishboneRes(res.ack, val, op.waitidle, op.waitstall, res.waitack-op.ts))
+                    result.append(wbr(res.ack, val, op.waitidle, op.waitstall, res.waitack-op.ts))
                 
             raise ReturnValue(result)
         else:
             self.log.error("Expecting a list")
-
+            raise ReturnValue(None)    
     
       
