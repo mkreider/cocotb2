@@ -136,21 +136,27 @@ class WishboneMaster(Wishbone):
         clkedge = RisingEdge(self.clock)
         count = 0
         if not hasattr(self.bus, "stall"):
-            while not self.is_reply_valid():
+            while not self._get_reply():
                 yield clkedge
                 count += 1
             self.log.debug("Waited %u cycles for ackknowledge" % count)
         raise ReturnValue(count)    
     
     
-    def is_reply_valid(self):
-        #helper function for slave acks            
-        valid = bool(self.bus.ack.getvalue())
-        if hasattr(self.bus, "err"):
-            valid = valid or bool(self.bus.err.getvalue())
-        if hasattr(self.bus, "rty"):
-            valid = valid or bool(self.bus.rty.getvalue())    
-        return valid 
+    def _get_reply(self):
+        #helper function for slave acks
+        tmpAck = int(self.bus.ack.getvalue())
+        tmpErr = 0
+        tmpRty = 0
+        if hasattr(self.bus, "err"):        
+            tmpErr = int(self.bus.err.getvalue())
+        if hasattr(self.bus, "rty"):        
+            tmpRty = int(self.bus.rty.getvalue())
+        #check if more than one line was raised    
+        if ((tmpAck + tmpErr + tmpRty)  > 1):
+            raise TestFailure("Slave raised more than one reply line at once! ACK: %u ERR: %u RTY: %u" % (tmpAck, tmpErr, tmpRty))
+        #return 0 if no reply, 1 for ACK, 2 for ERR, 3 for RTY. use 'replyTypes' Dict for lookup
+        return (tmpAck + 2 * tmpErr + 3 * tmpRty)
         
     
     @coroutine 
@@ -161,17 +167,20 @@ class WishboneMaster(Wishbone):
         count = 0
         clkedge = RisingEdge(self.clock)
         while self.busy:
-            if(self.is_reply_valid()):
-                val = int(self.bus.datrd.getvalue())
+            reply = self._get_reply()    
+            # valid reply?            
+            if(bool(reply)):
+                datrd = int(self.bus.datrd.getvalue())
                 #append reply and meta info to result buffer
-                self._res_buf.append(wbr(bool(self.bus.ack.getvalue()), val, None, None, self._clk_cycle_count))
+                tmpRes =  wbr(ack=reply, sel=None, adr=None, datrd=datrd, datwr=None, waitIdle=None, waitStall=None, waitAck=self._clk_cycle_count)               
+                self._res_buf.append(tmpRes)
                 self._acked_ops += 1
             yield clkedge
             count += 1    
 
     
     @coroutine
-    def _drive(self, we, adr, dat, sel, idle):
+    def _drive(self, we, adr, datwr, sel, idle):
         """
             Drive the Wishbone Master Out Lines
         """
@@ -188,13 +197,13 @@ class WishboneMaster(Wishbone):
             self.bus.stb    <= 1
             self.bus.adr    <= adr
             self.bus.sel    <= sel
-            self.bus.datwr  <= dat
+            self.bus.datwr  <= datwr
             self.bus.we     <= we
             yield clkedge
             #deal with flow control (pipelined wishbone)
             stalled = yield self._wait_stall()
             #append operation and meta info to auxiliary buffer
-            self._aux_buf.append(wba(we, sel, stalled, idle, self._clk_cycle_count))
+            self._aux_buf.append(wba(sel, adr, datwr, stalled, idle, self._clk_cycle_count))
             #reset strobe and write enable without advancing time
             self.bus.stb    <= 0
             self.bus.we     <= 0
@@ -241,12 +250,15 @@ class WishboneMaster(Wishbone):
                     cnt += 1
                 yield self._close_cycle()
                 
-                #do pick and mix from result- and auxiliary buffer so we get all meta info
-                for res, op in zip(self._res_buf, self._aux_buf):
-                    val = res.dat
-                    if op.we:
-                        val = None
-                    result.append(wbr(res.ack, val, op.waitidle, op.waitstall, res.waitack-op.ts))
+                #do pick and mix from result- and auxiliary buffer so we get all operation and meta info
+                for res, aux in zip(self._res_buf, self._aux_buf):
+                    res.datwr       = aux.datwr
+                    res.sel         = aux.sel
+                    res.adr         = aux.adr
+                    res.waitIdle    = aux.waitIdle
+                    res.waitStall   = aux.waitStall
+                    res.waitack    -= aux.ts
+                    result.append(res)
                 
             raise ReturnValue(result)
         else:

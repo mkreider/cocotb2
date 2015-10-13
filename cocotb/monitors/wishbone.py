@@ -4,16 +4,9 @@ from cocotb.decorators import coroutine
 from cocotb.monitors import BusMonitor
 from cocotb.triggers import RisingEdge
 from cocotb.wishbone_aux import WishboneRes as wbr
-from cocotb.wishbone_aux import WishboneOp as wbo
 from cocotb.wishbone_aux import replyTypes
 from cocotb.result import TestFailure
-
-
-def is_sequence(arg):
-        return (not hasattr(arg, "strip") and
-        hasattr(arg, "__getitem__") or
-        hasattr(arg, "__iter__"))
-
+import Queue
 
 class Wishbone(BusMonitor):
     """Wishbone
@@ -68,25 +61,29 @@ class WishboneSlave(Wishbone):
     
     def defaultGen():
         while True:        
-            yield int(0)   
+            yield int(0)
+            
+    def defaultGen1():
+        while True:        
+            yield int(1)          
     
     _acked_ops      = 0  # ack cntr. wait for equality with number of Ops before releasing lock
-    _op_buf         = [] # save datwr, sel, idle
+    _reply_Q        = Queue.Queue() # save datwr, sel, idle
     _res_buf        = [] # save readdata/ack/err/rty
     _clk_cycle_count = 0
     _cycle = False
     _datGen         = defaultGen()
-    _ackGen         = defaultGen()
+    _ackGen         = defaultGen1()
     _stallWaitGen   = defaultGen()
-    _replyWaitGen   = defaultGen()
-    _lastTime      = 0
-
+    _waitAckGen   = defaultGen()
+    _lastTime       = 0
+    _stallCount     = 0
     
 
     def __init__(self, *args, **kwargs):
         datGen = kwargs.pop('datgen', None)
         ackGen = kwargs.pop('ackgen', None)
-        replyWaitGen = kwargs.pop('replywaitgen', None)
+        waitAckGen = kwargs.pop('replywaitgen', None)
         stallWaitGen = kwargs.pop('stallwaitgen', None)
         Wishbone.__init__(self, *args, **kwargs)
         cocotb.fork(self._stall())
@@ -94,8 +91,8 @@ class WishboneSlave(Wishbone):
         cocotb.fork(self._ack())
         self.log.info("Wishbone Slave created")
         
-        if replyWaitGen != None:
-            self._replyWaitGen  = replyWaitGen 
+        if waitAckGen != None:
+            self._waitAckGen  = waitAckGen 
         if stallWaitGen != None:
             self._stallWaitGen  = self.bitSeqGen(stallWaitGen)
         if ackGen != None:
@@ -120,17 +117,26 @@ class WishboneSlave(Wishbone):
 
     @coroutine
     def _stall(self):
-        clkedge = RisingEdge(self.clock)         
+        clkedge = RisingEdge(self.clock)
+        # if stall drops, keep the value for one more clock cycle
         while True:
             if hasattr(self.bus, "stall"):
-                self.bus.stall <= self._stallWaitGen.next()
-            yield clkedge
+                tmpStall = self._stallWaitGen.next()
+                self.bus.stall <= tmpStall
+                if bool(tmpStall):                                
+                    self._stallCount += 1                    
+                    yield clkedge
+                else:
+                    yield clkedge                    
+                    self._stallCount = 0
+            
             
         
     @coroutine
     def _ack(self):
         clkedge = RisingEdge(self.clock)         
-        while True:        
+        while True: 
+            #set defaults
             self.bus.ack    <= 0
             self.bus.datrd  <= 0
             if hasattr(self.bus, "err"):
@@ -138,25 +144,27 @@ class WishboneSlave(Wishbone):
             if hasattr(self.bus, "rty"):
                 self.bus.rty <= 0        
             
-            if len(self._res_buf):
-                e = self._res_buf.pop()
-                if e.waitack != None:
-                    self.log.debug("AckDelay: %u" % e.waitack)
-                    waitcnt = e.waitack
+            if not self._reply_Q.empty():
+                #get next reply from queue                    
+                rep = self._reply_Q.get_nowait()
+                
+                #wait <waitAck> clock cycles before replying
+                if rep.waitAck != None:
+                    waitcnt = rep.waitAck
                     while waitcnt > 0:
                         waitcnt -= 1
                         yield clkedge
-                if not hasattr(self.bus, replyTypes[e.ack]):                
-                    raise TestFailure("Tried to assign <%s> (%u) to slave reply, but this slave does not have a <%s> line" % (replyTypes[e.ack], e.ack, replyTypes[e.ack]))
-                     
-                if replyTypes[e.ack]    == "ack":
+                
+                #check if the signal we want to assign exists and assign
+                if not hasattr(self.bus, replyTypes[rep.ack]):                
+                    raise TestFailure("Tried to assign <%s> (%u) to slave reply, but this slave does not have a <%s> line" % (replyTypes[rep.ack], rep.ack, replyTypes[rep.ack]))
+                if replyTypes[rep.ack]    == "ack":
                     self.bus.ack    <= 1
-                elif replyTypes[e.ack]  == "err":
+                elif replyTypes[rep.ack]  == "err":
                     self.bus.err    <= 1
-                elif replyTypes[e.ack]  == "rty":
+                elif replyTypes[rep.ack]  == "rty":
                     self.bus.rty    <= 1
-               
-                self.bus.datrd  <= e.dat
+                self.bus.datrd  <= rep.datrd
             yield clkedge
 
 
@@ -169,29 +177,34 @@ class WishboneSlave(Wishbone):
         if valid:
             #if there is a stall signal, take it into account
             #wait before replying ?    
-            replyWait = self._replyWaitGen.next()
+            waitAck = self._waitAckGen.next()
             #Response: rddata/don't care        
-            if (not self.bus.we.getvalue()):
-                dat = self._datGen.next()
+            if (not bool(self.bus.we.getvalue())):
+                rd = self._datGen.next()
             else:
-                dat = 0
+                rd = 0
          
             #Response: ack/err/rty
-            ack = self._ackGen.next()
-            if ack not in replyTypes:
-                raise TestFailure("Tried to assign unknown reply type (%u) to slave reply. Valid is 0-2 (ack, err, rty)" %  ack)
-                       
-            #we can't do it now, they might be delayed. add to result buffer
-            self._res_buf.append(wbr(ack, dat, 0, 0, replyWait))
-            datwr = None
-            if self.bus.we.getvalue():
-                datwr = self.bus.datwr.getvalue()
+            reply = self._ackGen.next()
+            if reply not in replyTypes:
+                raise TestFailure("Tried to assign unknown reply type (%u) to slave reply. Valid is 1-3 (ack, err, rty)" %  reply)
+            
+            wr = None
+            if bool(self.bus.we.getvalue()):
+                wr = self.bus.datwr.getvalue()
+            
             #get the time the master idled since the last operation
-            #TODO: subtract our own stalltime or, if we're not pipelined, time since last ack
-            idleTime = self._clk_cycle_count - self._lastTime -1
-            op = wbo(self.bus.adr.getvalue(), datwr, idleTime, self.bus.sel.getvalue())
+            #TODO: subtract our own stalltime or, if we're not pipelined, time since last ack    
+            idleTime = self._clk_cycle_count - self._lastTime -1    
+            res =  wbr(ack=reply, sel=self.bus.sel.getvalue(), adr=self.bus.adr.getvalue(), datrd=rd, datwr=wr, waitIdle=idleTime, waitStall=self._stallCount, waitAck=waitAck)               
+            #print "#ADR: 0x%08x,0x%x DWR: %s DRD: %s REP: %s IDL: %3u STL: %3u RWA: %3u" % (res.adr, res.sel, res.datwr, res.datrd, replyTypes[res.ack], res.waitIdle, res.waitStall, res.waitAck)       
+            
+           #add whats going to happen to the result buffer
+            self._res_buf.append(res)
+            #add it to the reply queue for assignment. we need to process ops every cycle, so we can't do the <waitreply> delay here
+            self._reply_Q.put(res)
             self._lastTime = self._clk_cycle_count
-            self._op_buf.append(op)
+            
             
 
     @coroutine
@@ -205,8 +218,9 @@ class WishboneSlave(Wishbone):
                 
             self._respond()
             if int(self._cycle) > int(self.bus.cyc.getvalue()):
-                self._recv(self._op_buf)
-                self._op_buf = []
-             
+                self._recv(self._res_buf)
+                self._reply_Q.queue.clear()
+                self._res_buf = []
+                
             self._cycle = self.bus.cyc.getvalue()
             yield clkedge

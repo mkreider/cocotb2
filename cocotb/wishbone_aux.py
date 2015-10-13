@@ -6,21 +6,26 @@ Created on Wed Oct  7 13:01:18 2015
 """
 
 class WishboneAux():
-    we          = False
+    adr   = 0
+    datwr = None     
     sel         = 0xf
-    waitstall   = 0
-    waitidle    = 0
+    waitStall   = 0
+    waitIdle    = 0
     ts          = 0
     
-    def __init__(self, we, sel, waitStall, waitIdle, tsStb):
-        self.we         = we        
+    def __init__(self, sel, adr, datwr, waitStall, waitIdle, tsStb):
+        self.adr        = adr
+        self.datwr      = datwr        
         self.sel        = sel
-        self.waitstall  = waitStall
-        self.ts       = tsStb
-        self.waitidle   = waitIdle
+        self.waitStall  = waitStall
+        self.ts         = tsStb
+        self.waitIdle   = waitIdle
 
 class WishboneRes():
-    dat = None
+    adr   = 0
+    sel   = 0xf
+    datwr = None    
+    datrd = None
     ack = False
     waitstall = 0
     waitack = 0
@@ -28,12 +33,15 @@ class WishboneRes():
     
           
     
-    def __init__(self, ack, dat, idles, stalled, waitack):
-        self.ack        = ack        
-        self.dat        = dat
-        self.waitstall  = stalled
-        self.waitack    = waitack
-        self.waitidle   = idles
+    def __init__(self, ack, sel, adr, datrd, datwr, waitIdle, waitStall, waitAck):
+        self.ack        = ack
+        self.sel        = sel
+        self.adr        = adr
+        self.datrd      = datrd
+        self.datwr      = datwr
+        self.waitStall  = waitStall
+        self.waitAck    = waitAck
+        self.waitIdle   = waitIdle
         
 class WishboneOp():
     adr     = 0
@@ -52,4 +60,4 @@ def is_sequence(arg):
         hasattr(arg, "__getitem__") or
         hasattr(arg, "__iter__"))
 
-replyTypes = {0 : "ack", 1 : "err", 2 : "rty"}           
+replyTypes = {1 : "ack", 2 : "err", 3 : "rty"}           
